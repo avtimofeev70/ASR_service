@@ -21,6 +21,9 @@ import os
 import logging
 from faster_whisper import WhisperModel
 
+from jiwer import wer
+from difflib import SequenceMatcher
+
 app = Flask(__name__)
 CORS(app)
 app.config['UPLOAD_FOLDER'] = 'uploads/'
@@ -40,6 +43,64 @@ WHISPER_MODELS_CONFIG = {
 
 # Время старта сервера
 START_TIME = datetime.now()
+
+
+def calculate_wer_and_highlight(reference: str, hypothesis: str) -> Tuple[float, str]:
+    """Вычисляет Word Error Rate (WER) и создает HTML с подсветкой различий между текстами.
+    
+    Args:
+        reference: Эталонный текст
+        hypothesis: Распознанный текст для сравнения
+        
+    Returns:
+        Tuple[float, str]: 
+            - WER score (0.0 - полное совпадение, 1.0 - все слова ошибочны)
+            - HTML строка с подсветкой различий цветами:
+                * Зеленый: правильные слова
+                * Красный: замененные слова
+                * Подчеркивание: лишние слова
+                * Зачеркивание: пропущенные слова
+
+    Raises:
+        ValueError: Если оба текста пустые
+    """
+    logger.debug("Начало вычисления WER для текстов длиной %d и %d символов", 
+                len(reference), len(hypothesis))
+    
+    # Проверка пустых входных данных
+    if not reference and not hypothesis:
+        error_msg = "Оба текста (reference и hypothesis) не могут быть пустыми"
+        logger.error(error_msg)
+        raise ValueError(error_msg)
+    
+    # Вычисление WER
+    error_rate = wer(reference, hypothesis)
+    
+    # Генерация подсветки различий
+    matcher = SequenceMatcher(None, reference.split(), hypothesis.split())
+    html_parts = []
+    
+    # Обработка различных типов различий
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == 'equal':
+            for word in hyp_words[j1:j2]:
+                html_parts.append(f'<span style="color: green;">{word}</span>')
+        elif tag == 'replace':
+            for word in hyp_words[j1:j2]:
+                html_parts.append(f'<span style="color: red;">{word}</span>')
+        elif tag == 'insert':
+            for word in hyp_words[j1:j2]:
+                html_parts.append(
+                    f'<span style="color: red; text-decoration: underline;">{word}</span>')
+        elif tag == 'delete':
+            for word in ref_words[i1:i2]:
+                html_parts.append(
+                    f'<span style="color: red; text-decoration: line-through;">{word}</span>')
+
+    highlighted_html = ' '.join(html_parts)
+    
+    logger.info("WER вычислен успешно. Score: %.2f", error_rate)
+    return error_rate, highlighted_html
 
 
 class WhisperModelManager:
@@ -413,6 +474,63 @@ def recognize_whisper(model_size: str):
 
     logger.info("Результат распознавания Whisper (%s): %s", model_size, text)
     return jsonify({'text': text})
+
+
+@app.route('/evaluate_wer', methods=['POST'])
+def evaluate_text():
+    """API endpoint для оценки качества распознавания речи с помощью WER.
+    
+    Принимает JSON с полями:
+    {
+        "reference": "Эталонный текст",
+        "hypothesis": "Распознанный текст"
+    }
+    
+    Returns:
+        JSON: {
+            "wer_score": float, 
+            "highlighted_html": str (HTML с подсветкой)
+        } или {"error": "сообщение"}
+        
+    Пример ошибок:
+        - 400: Неверный формат запроса или отсутствуют поля
+        - 500: Внутренняя ошибка при обработке
+    """
+    logger.info("Получен запрос на оценку WER")
+    
+    try:
+        data = request.get_json()
+        logger.debug("Данные запроса: %s", data)
+        
+        # Валидация входных данных
+        if not data or 'reference' not in data or 'hypothesis' not in data:
+            error_msg = "Отсутствуют обязательные поля: reference и hypothesis"
+            logger.warning(error_msg)
+            return jsonify({'error': error_msg}), 400
+            
+        reference = str(data['reference'])
+        hypothesis = str(data['hypothesis'])
+        
+        logger.debug("Обработка текстов: reference(%d chars), hypothesis(%d chars)",
+                    len(reference), len(hypothesis))
+        
+        # Вычисление WER и подсветки
+        wer_score, highlighted_html = calculate_wer_and_highlight(reference, hypothesis)
+        
+        logger.info("Успешный результат WER: %.2f", wer_score)
+        return jsonify({
+            'wer_score': wer_score,
+            'highlighted_html': highlighted_html
+        })
+        
+    except ValueError as e:
+        error_msg = f"Ошибка валидации: {str(e)}"
+        logger.error(error_msg)
+        return jsonify({'error': error_msg}), 400
+    except Exception as e:
+        error_msg = f"Непредвиденная ошибка: {str(e)}"
+        logger.exception(error_msg)
+        return jsonify({'error': error_msg}), 500
 
 
 if __name__ == '__main__':
