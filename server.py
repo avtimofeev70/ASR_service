@@ -79,7 +79,9 @@ def calculate_wer_and_highlight(reference: str, hypothesis: str) -> Tuple[float,
     # Генерация подсветки различий
     matcher = SequenceMatcher(None, reference.split(), hypothesis.split())
     html_parts = []
-    
+    ref_words = reference.split()
+    hyp_words = hypothesis.split()
+
     # Обработка различных типов различий
     for tag, i1, i2, j1, j2 in matcher.get_opcodes():
         if tag == 'equal':
